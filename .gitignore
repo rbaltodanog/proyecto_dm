@@ -1,0 +1,13 @@
+# Visual Studio IDE state
+.vs/
+
+# SSIS build output
+bin/
+obj/
+
+# User-specific settings
+*.dtproj.user
+*.suo
+
+# Visual Studio temp files
+*.user
