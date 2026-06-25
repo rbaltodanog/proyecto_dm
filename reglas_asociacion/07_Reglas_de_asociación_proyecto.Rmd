@@ -1,0 +1,292 @@
+---
+title: "Reglas de asociación para el dataset Chinook"
+author: "Roberto Baltodano - Sergio Blanco"
+date: "`r Sys.Date()`"
+output:
+  rmdformats::readthedown:
+    self_contained: true
+    toc_depth: 3
+    code_folding: show
+    highlight: tango
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+La idea es generar reglas de asociación para el dataset Chinook, que contiene información de ventas de música. Se busca identificar patrones de compra y relaciones entre productos.
+
+
+# Carga de librerias y  lectura de datos
+
+```{r}
+# install.packages("plyr")
+# install.packages("arules")
+# install.packages("arulesViz")
+# install.packages("tidyverse")
+
+
+library(plyr)
+library(arules)
+library(arulesViz)
+library(tidyverse)
+
+# library(dplyr)
+```
+
+
+```{r }
+datos <- read.csv("data-1782396576577.csv", sep = ",", dec = ".")
+
+
+# install.packages("readxl")
+# library(readxl)
+# datos<- read_excel('Online Retail.xlsx')
+
+head(datos, 10)
+head(datos)
+tail(datos)
+str(datos)
+summary(datos)
+```
+
+# Transformación inicial de los datos
+
+En esta sección se realiza una limpieza inicial de los datos, eliminando columnas innecesarias y verificando la presencia de valores nulos.
+
+```{r }
+sum(is.na(datos))
+
+colSums(is.na(datos))
+# rowSums(is.na(datos))
+datos$count_na_x1tox3 <- rowSums(is.na(datos))
+
+apply(X = is.na(datos), MARGIN = 1, FUN = sum) # Fila
+apply(X = is.na(datos), MARGIN = 2, FUN = sum) # Columna
+
+datos$genero_anterior <- NULL
+datosCompletos <- na.omit(datos)
+
+# se convierte la fecha a tipo Date
+datosCompletos$Date <- as.Date(as.character(datosCompletos$llave_fecha), format = "%Y%m%d")
+summary(datosCompletos)
+head(datosCompletos)
+```
+
+# Convertir los datos originales a formato transacción.
+
+Procederemos a convertir los datos a un formato de transacción, agrupando las compras por factura y fecha, y concatenando los productos comprados en cada transacción.
+
+Luego se guarda el resultado en un archivo CSV para su posterior análisis con reglas de asociación.
+
+```{r }
+# se agrupan las transacciones con igual InvoiceNo y Date
+# luego se concatena con una coma
+
+transacciones <- ddply(
+  datosCompletos, c("id_factura", "Date"),
+  function(dataf) paste(dataf$genero_actual, collapse = ",")
+)
+
+# se descartan la fecha y el # de facturas para las reglas de asociación
+
+transacciones$id_factura <- NULL
+transacciones$Date <- NULL
+
+# se renombra la columna restante como items
+
+colnames(transacciones) <- c("items")
+
+# se guardan los datos como archivo csv en formato transaccion
+write.table(transacciones, "transaccionesOR.csv", quote = FALSE, row.names = FALSE, col.names = FALSE)
+```
+
+# Lectura y Exploración  
+
+# Lectura de los datos en formato transacción
+
+Se realiza la lectura del archivo CSV generado anteriormente, especificando el formato de las transacciones y eliminando duplicados.
+
+
+```{r}
+library(arules)
+transacc <- read.transactions("transaccionesOR.csv", sep = ",", format = "basket", quote = "", rm.duplicates = 1)
+# transacc<- read.transactions('transaccionesOR.csv', sep=',', format = 'basket')
+```
+
+# Exploración de las transacciones
+
+La exploración de las transacciones permite obtener un resumen de las mismas, así como inspeccionar las primeras transacciones para entender la estructura de los datos.
+
+```{r}
+summary(transacc)
+inspect(transacc[1:5])
+
+# install.packages("tidyverse")
+# como alternativa install.packages("tibble")
+# aplicar el paquete tidyverse
+df_transacciones <- as(transacc, Class = "data.frame")
+# Para que el tamaño de la tabla se ajuste mejor, se convierte el dataframe a tibble
+as.tibble(df_transacciones) %>% head(10)
+```
+
+# Determinar el tamaño de cada transaccion
+
+El determinar el tamaño de cada transaccion permite identificar la cantidad de items comprados en cada transacción, lo cual es útil para entender el comportamiento de compra de los clientes y para ajustar los parámetros en la generación de reglas de asociación.
+
+```{r}
+tamanyos <- size(transacc)
+summary(tamanyos)
+quantile(tamanyos, probs = seq(0, 1, 0.1))
+```
+
+# Determinar los items más frecuentes
+
+El determinar los items más frecuentes nos ayuda a identificar los productos que son más populares entre los clientes, lo cual puede ser útil para estrategias de marketing y promociones.
+
+
+```{r}
+frecuentes <- eclat(transacc, parameter = list(supp = 0.001, maxlen = 10))
+
+itemFrequencyPlot(transacc, topN = 10, type = "absolute", main = "Items más frecuentes")
+```
+
+# Generación de las reglas usando Apriori
+
+Las reglas usando Apriori te permite identificar patrones de compra y relaciones entre productos, lo cual es útil para estrategias de marketing y promociones.
+
+Estas reglas se generan con un soporte mínimo de 0.001 y una confianza mínima de 0.8, limitando la longitud máxima de las reglas a 10.
+
+
+```{r}
+reglas <- apriori(transacc, parameter = list(supp = 0.001, conf = 0.8, maxlen = 10))
+```
+
+```{r}
+inspect(reglas[1:10])
+```
+Generacion con menos reglas. 
+
+
+```{r}
+# Generar menos reglas
+reglas <- apriori(transacc, parameter = list(supp = 0.001, conf = 0.8, maxlen = 4))
+```
+
+
+
+```{r}
+inspect(reglas[1:10])
+```
+Se procede a eliminar las reglas que son subconjuntos de otras para obtener un conjunto más conciso de reglas significativas.
+
+```{r}
+# eliminar reglas que son subconjuntos de otras
+subconjuntos <- which(colSums(is.subset(reglas, reglas)) > 1)
+
+reglasFinal <- reglas[-subconjuntos]
+inspect(reglasFinal[1:10])
+```
+
+
+Se procede a ordenar las reglas finales por soporte y se observan las primeras 10 reglas para identificar las más relevantes en términos de frecuencia de ocurrencia.
+
+```{r}
+# se ordena por soporte y se observan las primeras 10 reglas
+inspect(sort(reglasFinal, by = "support", decreasing = TRUE)[1:10])
+```
+Se realiza el filtrado de las reglas finales para obtener aquellas con una confianza superior a 0.85, lo que permite enfocarse en las reglas más confiables y significativas para el análisis.
+
+
+```{r}
+# se filtran las reglas con confianza superior a 0.15
+mejoresReglas <- reglasFinal[quality(reglasFinal)$confidence > 0.85]
+inspect(mejoresReglas[1:10])
+```
+# Visualización de las reglas mediante un gráfico de dispersión
+
+1. Los elementos del gráfico (Nodos)
+ 
+   Las cajas rectangulares (azules): Representan los ítems de tu base de datos, es decir, los géneros individuales (ej. Jazz, Rock, Heavy Metal).
+ 
+   Los círculos (con texto "rule 1", "rule 2", etc.): Representan las reglas de asociación en sí mismas. Sirven como "puentes" entre los géneros.
+
+2. La dirección de las flechas (La lógica de la regla)
+ 
+   Las flechas indican la relación causa-efecto (Antecedente $\rightarrow$ Consecuente):
+ 
+   Flechas que ENTRAN al círculo: Vienen de los antecedentes. Son los productos que el cliente ya tiene.
+ 
+   Flechas que SALEN del círculo: Apuntan hacia el consecuente. Es el producto que el cliente va a comprar a consecuencia del anterior.
+
+3. Tamaño y Color de los círculos (Fuerza de la regla)
+ 
+  Color (Intensidad): Generalmente, representa el Lift (levantamiento). Entre más oscuro o intenso sea el color (como la rule 1 que es completamente roja), más fuerte e importante es la regla (es decir, los productos están muy fuertemente relacionados y no es por simple azar).
+ 
+   Tamaño del círculo: Generalmente, representa el Soporte (support). Un círculo más grande significa que esta regla ocurre con mucha frecuencia en tu base de datos total.
+
+
+```{r}
+tresMejoresReglas <- head(mejoresReglas, n = 5, by = "confidence")
+
+plot(tresMejoresReglas, method = "graph", engine = "htmlwidget")
+```
+
+# Visualización de 10 reglas mediante gráfico paracoord
+
+El gráfico siguiente  permite descubrir a simple vista qué géneros son "detonantes". Por ejemplo, observando el gráfico puedes notar que géneros como "Easy Listening" o "Sci Fi & Fantasy" actúan directamente como posición 1 apuntando fuertemente hacia otros géneros, lo cual te puede servir para crear recomendaciones directas en la tienda (ej. "Los que compraron esto, también compraron...").
+
+Cada conjunto de flechas conectadas representa una regla de asociación individual. Las flechas fluyen desde los antecedentes (izquierda/centro) y apuntan hacia el consecuente (derecha).
+
+Tomemos como ejemplo la línea roja (la más resaltada):
+
+1. Comienza en el eje izquierdo bajo la posición 2 en el género "Drama".
+1. Luego baja hacia la posición 1 en el género "Alternative & Punk".
+1- Finalmente, apunta hacia el rhs terminando en "Science Fiction".
+
+¿Qué significa esto? Esta regla se lee como: {Drama, Alternative & Punk} => {Science Fiction}. Es decir, "Si un cliente compra géneros de Drama y Alternative & Punk, entonces existe una altísima probabilidad de que también compre contenido de Science Fiction".
+
+
+
+```{r}
+Top10 <- head(mejoresReglas, n = 15, by = "confidence")
+
+plot(Top10, method = "paracoord")
+```
+# Determinar de productos y consecuencias 
+
+## Determinar productos en el antecedente dada una consecuencia
+
+```{r}
+reglasProductoAnte <- apriori(transacc,
+  parameter = list(supp = 0.001, conf = 0.8),
+  appearance = list(default = "lhs", rhs = "Rock")
+)
+```
+
+```{r}
+inspect(head(reglasProductoAnte))
+```
+
+## Determinar la(s) consecuencia(a) dado el antecedente
+
+```{r}
+reglasSigProducto <- apriori(transacc,
+  parameter = list(supp = 0.001, conf = 0.85),
+  appearance = list(lhs = "Metal", default = "rhs")
+)
+```
+
+```{r}
+inspect(head(reglasSigProducto))
+```
+
+# Exportar las reglas
+
+```{r}
+write(mejoresReglas, file = "mejoresReglas.csv", sep = ",", quote = F, row.names = F)
+```
