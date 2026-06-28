@@ -11,3 +11,7 @@ obj/
 
 # Visual Studio temp files
 *.user
+
+# RStudio
+.RData
+.Rhistory

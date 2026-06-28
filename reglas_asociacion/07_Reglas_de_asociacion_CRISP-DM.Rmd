@@ -1,0 +1,383 @@
+---
+title: "Reglas de asociación para Chinook — Aplicación de CRISP-DM"
+author: "Roberto Baltodano - Sergio Blanco"
+date: "`r Sys.Date()`"
+output:
+  rmdformats::readthedown:
+    self_contained: true
+    toc_depth: 3
+    code_folding: show
+    highlight: tango
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Este cuaderno aplica de forma parcial la metodología **CRISP-DM** (Cross
+Industry Standard Process for Data Mining) sobre los datos de ventas de
+Chinook Digital Media Store. El modelo de minería seleccionado es el de
+**reglas de asociación** (análisis de canasta de mercado), y cada sección
+del documento corresponde explícitamente a una de las fases de CRISP-DM:
+comprensión del negocio, comprensión de los datos, preparación de los
+datos, modelado, evaluación y despliegue.
+
+# Fase 1 — Comprensión del negocio
+
+## Contexto
+
+Chinook es una tienda de música digital cuyo objetivo estratégico, según
+el anteproyecto, es **maximizar los ingresos por ventas recurrentes a
+través de la retención y fidelización de clientes de alto valor**
+(Objetivo de Negocio 2). Dentro de ese objetivo, el presente modelo de
+minería da soporte directo al **Criterio de éxito 2.2**: generar la base
+para que marketing despliegue campañas de promociones personalizadas
+(por ejemplo, cupones por géneros preferidos), buscando un incremento del
+ticket promedio de compra.
+
+## Problema de negocio que resuelve el modelo
+
+A diferencia de los requerimientos descriptivos del Data Warehouse
+(rotación de catálogo, clientes VIP), aquí el problema es de
+**cross-selling y recomendación**: descubrir qué géneros musicales tienden
+a comprarse juntos en una misma factura. Las reglas de la forma
+`{género A} => {género B}` permiten construir recomendaciones del tipo
+"los clientes que compraron esto también compraron…" y diseñar cupones
+cruzados.
+
+## Objetivos de minería de datos
+
+- Descubrir reglas de asociación entre géneros co-comprados dentro de una
+  misma transacción (factura).
+- Obtener un conjunto **conciso e interpretable** de reglas, libre de
+  redundancias, accionable por el equipo de marketing.
+
+## Criterios de éxito de la minería
+
+- Reglas con **confianza superior a 0.85** y **lift mayor que 1** (que
+  evidencie asociación real y no coincidencia por azar).
+- Resultado exportable para su consumo en el dashboard y en campañas.
+
+## Recursos
+
+- Datos extraídos del **Data Warehouse** propio (hechos de ventas y la
+  dimensión de producto con su género), no de la base transaccional cruda.
+- Lenguaje R con los paquetes `arules` y `arulesViz`.
+
+# Fase 2 — Comprensión de los datos
+
+## Carga de librerías y lectura de datos
+
+```{r}
+# install.packages("plyr")
+# install.packages("arules")
+# install.packages("arulesViz")
+# install.packages("tidyverse")
+
+
+library(plyr)
+library(arules)
+library(arulesViz)
+library(tidyverse)
+
+# library(dplyr)
+```
+
+El insumo es un archivo CSV exportado desde el Data Warehouse, con el
+detalle de género por factura y fecha (`id_factura`, `genero_actual`,
+`llave_fecha`, entre otros).
+
+```{r }
+datos <- read.csv("data-1782396576577.csv", sep = ",", dec = ".")
+
+
+# install.packages("readxl")
+# library(readxl)
+# datos<- read_excel('Online Retail.xlsx')
+
+head(datos, 10)
+head(datos)
+tail(datos)
+str(datos)
+summary(datos)
+```
+
+## Revisión de calidad: valores nulos
+
+Antes de transformar los datos se inspecciona la presencia de valores
+faltantes por fila y por columna, para dimensionar la limpieza necesaria
+en la siguiente fase.
+
+```{r }
+sum(is.na(datos))
+
+colSums(is.na(datos))
+
+apply(X = is.na(datos), MARGIN = 1, FUN = sum) # Fila
+apply(X = is.na(datos), MARGIN = 2, FUN = sum) # Columna
+```
+
+# Fase 3 — Preparación de los datos
+
+> CRISP-DM es iterativo: la comprensión y la preparación de los datos se
+> retroalimentan. En esta fase se limpia el conjunto, se construye el
+> formato transaccional y se vuelve a explorar el dataset ya preparado
+> para confirmar que está listo para el modelado.
+
+## Limpieza y conversión de tipos
+
+Se elimina la columna `genero_anterior` (no se usa en el modelo), se
+descartan los registros con nulos y se convierte `llave_fecha` a tipo
+`Date`.
+
+```{r }
+# rowSums(is.na(datos))
+datos$count_na_x1tox3 <- rowSums(is.na(datos))
+
+datos$genero_anterior <- NULL
+datosCompletos <- na.omit(datos)
+
+# se convierte la fecha a tipo Date
+datosCompletos$Date <- as.Date(as.character(datosCompletos$llave_fecha), format = "%Y%m%d")
+summary(datosCompletos)
+head(datosCompletos)
+```
+
+## Conversión a formato transacción
+
+Se agrupan las compras por factura y fecha, concatenando los géneros
+adquiridos en cada transacción, y se guarda el resultado en un CSV con
+formato de canasta (`basket`).
+
+```{r }
+# se agrupan las transacciones con igual InvoiceNo y Date
+# luego se concatena con una coma
+
+transacciones <- ddply(
+  datosCompletos, c("id_factura", "Date"),
+  function(dataf) paste(dataf$genero_actual, collapse = ",")
+)
+
+# se descartan la fecha y el # de facturas para las reglas de asociación
+
+transacciones$id_factura <- NULL
+transacciones$Date <- NULL
+
+# se renombra la columna restante como items
+
+colnames(transacciones) <- c("items")
+
+# se guardan los datos como archivo csv en formato transaccion
+write.table(transacciones, "transaccionesOR.csv", quote = FALSE, row.names = FALSE, col.names = FALSE)
+```
+
+## Lectura del archivo en formato transacción
+
+```{r}
+library(arules)
+transacc <- read.transactions("transaccionesOR.csv", sep = ",", format = "basket", quote = "", rm.duplicates = 1)
+# transacc<- read.transactions('transaccionesOR.csv', sep=',', format = 'basket')
+```
+
+## Exploración del conjunto transaccional preparado
+
+Se inspecciona la estructura de las transacciones generadas para validar
+que la preparación fue correcta.
+
+```{r}
+summary(transacc)
+inspect(transacc[1:5])
+
+# install.packages("tidyverse")
+# como alternativa install.packages("tibble")
+# aplicar el paquete tidyverse
+df_transacciones <- as(transacc, Class = "data.frame")
+# Para que el tamaño de la tabla se ajuste mejor, se convierte el dataframe a tibble
+as.tibble(df_transacciones) %>% head(10)
+```
+
+Tamaño de cada transacción (cantidad de géneros por factura):
+
+```{r}
+tamanyos <- size(transacc)
+summary(tamanyos)
+quantile(tamanyos, probs = seq(0, 1, 0.1))
+```
+
+Ítems (géneros) más frecuentes, que ayudan a anticipar qué productos
+dominarán las reglas:
+
+```{r}
+frecuentes <- eclat(transacc, parameter = list(supp = 0.001, maxlen = 10))
+
+itemFrequencyPlot(transacc, topN = 10, type = "absolute", main = "Items más frecuentes")
+```
+
+# Fase 4 — Modelado
+
+El algoritmo seleccionado es **Apriori**, apropiado para descubrir reglas
+de asociación. Se parte de un soporte mínimo de 0.001 y una confianza
+mínima de 0.8.
+
+## Generación inicial de reglas
+
+```{r}
+reglas <- apriori(transacc, parameter = list(supp = 0.001, conf = 0.8, maxlen = 10))
+```
+
+```{r}
+inspect(reglas[1:10])
+```
+
+## Refinamiento: reducir el número de reglas
+
+Se reduce la longitud máxima de las reglas para obtener un conjunto más
+manejable.
+
+```{r}
+# Generar menos reglas
+reglas <- apriori(transacc, parameter = list(supp = 0.001, conf = 0.8, maxlen = 4))
+```
+
+```{r}
+inspect(reglas[1:10])
+```
+
+## Eliminación de reglas redundantes
+
+Se descartan las reglas que son subconjuntos de otras, para quedarse con
+un conjunto conciso y significativo.
+
+```{r}
+# eliminar reglas que son subconjuntos de otras
+subconjuntos <- which(colSums(is.subset(reglas, reglas)) > 1)
+
+reglasFinal <- reglas[-subconjuntos]
+inspect(reglasFinal[1:10])
+```
+
+## Ordenamiento por soporte
+
+```{r}
+# se ordena por soporte y se observan las primeras 10 reglas
+inspect(sort(reglasFinal, by = "support", decreasing = TRUE)[1:10])
+```
+
+## Filtrado por confianza
+
+Se conservan las reglas con confianza superior a 0.85, que serán las
+candidatas accionables para el negocio.
+
+```{r}
+# se filtran las reglas con confianza superior a 0.85
+mejoresReglas <- reglasFinal[quality(reglasFinal)$confidence > 0.85]
+inspect(mejoresReglas[1:10])
+```
+
+## Consultas dirigidas (modelado orientado a producto)
+
+### Antecedentes que llevan a un consecuente dado ("Rock")
+
+```{r}
+reglasProductoAnte <- apriori(transacc,
+  parameter = list(supp = 0.001, conf = 0.8),
+  appearance = list(default = "lhs", rhs = "Rock")
+)
+```
+
+```{r}
+inspect(head(reglasProductoAnte))
+```
+
+### Consecuente dado un antecedente ("Metal")
+
+```{r}
+reglasSigProducto <- apriori(transacc,
+  parameter = list(supp = 0.001, conf = 0.85),
+  appearance = list(lhs = "Metal", default = "rhs")
+)
+```
+
+```{r}
+inspect(head(reglasSigProducto))
+```
+
+# Fase 5 — Evaluación
+
+En esta fase se valoran las reglas obtenidas en dos niveles: la
+**evaluación técnica** (calidad estadística de las reglas mediante
+soporte, confianza y lift) y la **evaluación de negocio** (si los
+resultados sirven al objetivo planteado en la Fase 1).
+
+## Visualización: gráfico de grafo (support, confidence, lift)
+
+Lectura del gráfico:
+
+1. **Nodos.** Las cajas rectangulares (azules) representan los géneros
+   individuales (ej. Jazz, Rock, Heavy Metal). Los círculos ("rule 1",
+   "rule 2"…) representan las reglas y actúan como puentes entre géneros.
+2. **Dirección de las flechas.** Las que entran al círculo vienen de los
+   antecedentes (lo que el cliente ya tiene); las que salen apuntan al
+   consecuente (lo que tenderá a comprar).
+3. **Color y tamaño.** El color (intensidad) representa el **lift**: a
+   mayor intensidad, más fuerte la asociación y menos atribuible al azar.
+   El tamaño del círculo representa el **soporte**: a mayor tamaño, mayor
+   frecuencia de la regla en el total de transacciones.
+
+```{r}
+tresMejoresReglas <- head(mejoresReglas, n = 5, by = "confidence")
+
+plot(tresMejoresReglas, method = "graph", engine = "htmlwidget")
+```
+
+## Visualización: coordenadas paralelas (paracoord)
+
+Este gráfico permite descubrir a simple vista qué géneros son
+"detonantes". Cada conjunto de flechas conectadas representa una regla:
+las flechas fluyen desde los antecedentes (izquierda/centro) hacia el
+consecuente (derecha). Por ejemplo, la regla
+`{Drama, Alternative & Punk} => {Science Fiction}` se lee como: si un
+cliente compra Drama y Alternative & Punk, existe alta probabilidad de que
+también compre Science Fiction.
+
+```{r}
+Top10 <- head(mejoresReglas, n = 15, by = "confidence")
+
+plot(Top10, method = "paracoord")
+```
+
+## Evaluación frente al objetivo de negocio
+
+Las reglas con **lift > 1** confirman asociaciones reales entre géneros, y
+las de **mayor confianza** son las directamente accionables para el
+Criterio de éxito 2.2: cada regla `{A} => {B}` se traduce en un cupón
+cruzado o en una recomendación dentro de la tienda. Los géneros que
+aparecen como "detonantes" (posición antecedente con flechas fuertes hacia
+otros géneros) son los candidatos prioritarios para sembrar campañas de
+recomendación. De este modo, el resultado técnico queda enlazado con la
+meta de incrementar el ticket promedio de compra.
+
+# Fase 6 — Despliegue
+
+El despliegue no se materializa en un archivo de exportación, sino en la
+puesta a disposición del negocio del conocimiento descubierto por el
+modelo. Las reglas de asociación obtenidas se traducen en acciones
+concretas alineadas con los objetivos del anteproyecto:
+
+- **Recomendación de venta cruzada.** Cada regla `{A} => {B}` sustenta
+  recomendaciones del tipo "los clientes que compraron este género también
+  compraron…" dentro de la tienda digital.
+- **Cupones personalizados por género.** Las reglas de mayor confianza se
+  materializan en cupones cruzados dirigidos a los segmentos identificados,
+  atendiendo directamente al **Criterio de éxito 2.2** del anteproyecto
+  (campañas personalizadas para incrementar el ticket promedio).
+- **Visualización para el negocio.** Los resultados se entregan mediante el
+  **dashboard en Tableau Public**, construido sobre el Data Warehouse, que
+  permite a las áreas de marketing y adquisiciones explorar las asociaciones
+  entre géneros para la toma de decisiones.
+- **Monitoreo e iteración.** Como cierre del ciclo iterativo de CRISP-DM, el
+  modelo puede re-ejecutarse conforme ingresan nuevas ventas al Data
+  Warehouse, manteniendo vigentes las reglas en el tiempo.
